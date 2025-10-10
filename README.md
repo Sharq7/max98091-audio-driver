@@ -8,6 +8,8 @@ The driver in mainline linux kernel, has a compatibility flag and of_device_id b
 support for max98090 and max98091, BUT it is not so. max98091 is not supported, as the routes
 and widgets are not coded in the max98090.c code.
 
-An attempt would be made to mainline this code. But for the moment it is present here. To
+The driver here has everything added.
+
+An attempt would be made to mainline the code here. But for the moment it is present here. To
 test it or run it, just copy paste this file to max98090.c in the linux kernel and build the
 module.
