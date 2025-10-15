@@ -10,30 +10,17 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/pm.h>
-#include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
 #include <linux/acpi.h>
 #include <linux/clk.h>
-#include <linux/proc_fs.h>
 #include <sound/jack.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 #include <sound/tlv.h>
 #include <sound/max98090.h>
-#include <mx/mx-class.h>
 #include "max98090.h"
-
-#define MAX98091_PROC "max98091_stat"
-
-struct max98090_t {
-	struct i2c_client *client;
-	short reg_cache_size;
-	void *reg_cache;
-};
-
-struct max98090_t *max98090_mx;
 
 /* Allows for sparsely populated register maps */
 static const struct reg_default max98090_reg[] = {
@@ -409,6 +396,7 @@ static int max98090_put_enab_tlv(struct snd_kcontrol *kcontrol,
 	unsigned int sel;
 	unsigned int val = snd_soc_component_read(component, mc->reg);
 	unsigned int *select;
+	int change;
 
 	switch (mc->reg) {
 	case M98090_REG_MIC1_INPUT_LEVEL:
@@ -430,6 +418,7 @@ static int max98090_put_enab_tlv(struct snd_kcontrol *kcontrol,
 		return -EINVAL;
 	sel = sel_unchecked;
 
+	change = *select != sel;
 	*select = sel;
 
 	/* Setting a volume is only valid if it is already On */
@@ -444,7 +433,7 @@ static int max98090_put_enab_tlv(struct snd_kcontrol *kcontrol,
 		mask << mc->shift,
 		sel << mc->shift);
 
-	return *select != val;
+	return change;
 }
 
 static const char *max98090_perf_pwr_text[] =
@@ -828,11 +817,7 @@ static SOC_ENUM_SINGLE_VIRT_DECL(dmic_mux_enum, dmic_mux_text);
 static const struct snd_kcontrol_new max98090_dmic_mux =
 	SOC_DAPM_ENUM("DMIC Mux", dmic_mux_enum);
 
-static const char *dmic_mX_mux_text[] = { "Enable", "Disable" };
-
-// mx sharq: SOC_ENUM_SINGLE_VIRT_DECL is macro to define ALSA ASoc
-// to define enumerated controls(like mux), but with no backing
-// register(virtual)
+static const char * const dmic_mX_mux_text[] = { "Enable", "Disable" };
 
 static SOC_ENUM_SINGLE_VIRT_DECL(dmic_m1_enum, dmic_mX_mux_text);
 static const struct snd_kcontrol_new max98090_dmic_m1_mux =
@@ -1283,21 +1268,12 @@ static const struct snd_soc_dapm_route max98090_dapm_routes[] = {
 	{"MIC1 Input", NULL, "MIC1"},
 	{"MIC2 Input", NULL, "MIC2"},
 
-	/* primary mic IN1/IN2 inputs */
 	{"DMICL", NULL, "DMICL_ENA"},
 	{"DMICL", NULL, "DMICR_ENA"},
 	{"DMICR", NULL, "DMICL_ENA"},
 	{"DMICR", NULL, "DMICR_ENA"},
 	{"DMICL", NULL, "AHPF"},
 	{"DMICR", NULL, "AHPF"},
-
-	/* secondary mic IN5/IN6 inputs */
-	{"DMIC3", NULL, "DMIC3_ENA"},
-	{"DMIC3", NULL, "DMIC4_ENA"},
-	{"DMIC4", NULL, "DMIC3_ENA"},
-	{"DMIC4", NULL, "DMIC4_ENA"},
-	{"DMIC3", NULL, "DMIC34 DC Blocking"},
-	{"DMIC4", NULL, "DMIC34 DC Blocking"},
 
 	/* MIC1 input mux */
 	{"MIC1 Mux", "IN12", "IN12"},
@@ -1363,21 +1339,10 @@ static const struct snd_soc_dapm_route max98090_dapm_routes[] = {
 
 	{"AIFOUTL", NULL, "LBENL Mux"},
 	{"AIFOUTR", NULL, "LBENR Mux"},
-
-	{"DMIC M2 Mux", "Enable", "DMIC3"},
-	{"DMIC M2 Mux", "Enable", "DMIC4"},
-
-	{"AIFOUT2L", NULL, "DMIC M2 Mux"},
-	{"AIFOUT2R", NULL, "DMIC M2 Mux"},
-
 	{"AIFOUTL", NULL, "SHDN"},
 	{"AIFOUTR", NULL, "SHDN"},
 	{"AIFOUTL", NULL, "SDOEN"},
 	{"AIFOUTR", NULL, "SDOEN"},
-	{"AIFOUT2L", NULL, "SHDN"},
-	{"AIFOUT2R", NULL, "SHDN"},
-	{"AIFOUT2L", NULL, "SDOEN"},
-	{"AIFOUT2R", NULL, "SDOEN"},
 
 	{"LTENL Mux", "Normal", "AIFINL"},
 	{"LTENL Mux", "Loopthrough", "LBENL Mux"},
@@ -1391,7 +1356,6 @@ static const struct snd_soc_dapm_route max98090_dapm_routes[] = {
 	{"STENL Mux", "Sidetone Left", "DMICL"},
 	{"STENR Mux", "Sidetone Right", "ADCR"},
 	{"STENR Mux", "Sidetone Right", "DMICR"},
-
 	{"DACL", NULL, "STENL Mux"},
 	{"DACR", NULL, "STENR Mux"},
 
@@ -1489,7 +1453,6 @@ static const struct snd_soc_dapm_route max98091_dapm_routes[] = {
 	{"DMIC3", NULL, "DMIC3_ENA"},
 	{"DMIC4", NULL, "DMIC4_ENA"},
 
-	/* secondary mic IN5/IN6 inputs */
 	{"DMIC3", NULL, "DMIC3_ENA"},
 	{"DMIC3", NULL, "DMIC4_ENA"},
 	{"DMIC4", NULL, "DMIC3_ENA"},
@@ -1525,15 +1488,13 @@ static int max98090_add_widgets(struct snd_soc_component *component)
 	snd_soc_dapm_new_controls(dapm, max98090_dapm_widgets,
 		ARRAY_SIZE(max98090_dapm_widgets));
 
-	if (max98090->devtype == MAX98091) {
-		snd_soc_dapm_new_controls(dapm, max98091_dapm_widgets,
-			ARRAY_SIZE(max98091_dapm_widgets));
-	}
-
 	snd_soc_dapm_add_routes(dapm, max98090_dapm_routes,
 		ARRAY_SIZE(max98090_dapm_routes));
 
 	if (max98090->devtype == MAX98091) {
+		snd_soc_dapm_new_controls(dapm, max98091_dapm_widgets,
+			ARRAY_SIZE(max98091_dapm_widgets));
+
 		snd_soc_dapm_add_routes(dapm, max98091_dapm_routes,
 			ARRAY_SIZE(max98091_dapm_routes));
 	}
@@ -1663,7 +1624,7 @@ static int max98090_dai_set_fmt(struct snd_soc_dai *codec_dai,
 	struct snd_soc_component *component = codec_dai->component;
 	struct max98090_priv *max98090 = snd_soc_component_get_drvdata(component);
 	struct max98090_cdata *cdata;
-	u8 regval;
+	u8 regval, tdm_regval;
 
 	max98090->dai_fmt = fmt;
 	cdata = &max98090->dai[0];
@@ -1672,10 +1633,10 @@ static int max98090_dai_set_fmt(struct snd_soc_dai *codec_dai,
 		cdata->fmt = fmt;
 
 		regval = 0;
-		switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-		case SND_SOC_DAIFMT_CBS_CFS:
-			/* Set to slave mode PLL - MAS mode off */
-			printk("CBS_CFS %d %s %s\n",__LINE__,__FILE__,__func__);
+		tdm_regval = 0;
+		switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
+		case SND_SOC_DAIFMT_CBC_CFC:
+			/* Set to consumer mode PLL - MAS mode off */
 			snd_soc_component_write(component,
 				M98090_REG_CLOCK_RATIO_NI_MSB, 0x00);
 			snd_soc_component_write(component,
@@ -1684,9 +1645,8 @@ static int max98090_dai_set_fmt(struct snd_soc_dai *codec_dai,
 				M98090_USE_M1_MASK, 0);
 			max98090->master = false;
 			break;
-		case SND_SOC_DAIFMT_CBM_CFM:
-			printk("CBM_CFM %d %s %s\n",__LINE__,__FILE__,__func__);
-			/* Set to master mode */
+		case SND_SOC_DAIFMT_CBP_CFP:
+			/* Set to provider mode */
 			if (max98090->tdm_slots == 4) {
 				/* TDM */
 				regval |= M98090_MAS_MASK |
@@ -1702,8 +1662,6 @@ static int max98090_dai_set_fmt(struct snd_soc_dai *codec_dai,
 			}
 			max98090->master = true;
 			break;
-		case SND_SOC_DAIFMT_CBS_CFM:
-		case SND_SOC_DAIFMT_CBM_CFS:
 		default:
 			dev_err(component->dev, "DAI clock mode unsupported");
 			return -EINVAL;
@@ -1711,10 +1669,8 @@ static int max98090_dai_set_fmt(struct snd_soc_dai *codec_dai,
 		snd_soc_component_write(component, M98090_REG_MASTER_MODE, regval);
 
 		regval = 0;
-		printk("%d %s %s\n",__LINE__,__FILE__,__func__);
 		switch (fmt & SND_SOC_DAIFMT_FORMAT_MASK) {
 		case SND_SOC_DAIFMT_I2S:
-			printk("%d %s %s\n",__LINE__,__FILE__,__func__);
 			regval |= M98090_DLY_MASK;
 			break;
 		case SND_SOC_DAIFMT_LEFT_J:
@@ -1723,7 +1679,8 @@ static int max98090_dai_set_fmt(struct snd_soc_dai *codec_dai,
 			regval |= M98090_RJ_MASK;
 			break;
 		case SND_SOC_DAIFMT_DSP_A:
-			break; // datasheet page 120
+			tdm_regval |= M98090_TDM_MASK;
+			break;
 		default:
 			dev_err(component->dev, "DAI format unsupported");
 			return -EINVAL;
@@ -1746,25 +1703,30 @@ static int max98090_dai_set_fmt(struct snd_soc_dai *codec_dai,
 			return -EINVAL;
 		}
 
-		/* COMMENT FROM THE ORIGINAL AUTHORS */
 		/*
 		 * This accommodates an inverted logic in the MAX98090 chip
 		 * for Bit Clock Invert (BCI). The inverted logic is only
 		 * seen for the case of TDM mode. The remaining cases have
 		 * normal logic.
+		 *
+		 * If one hears noise in audio, try commenting below code and
+		 * then try again. Also, try playing around with register 0xC1
+		 * record tdm slot.
 		 */
-		/*if (max98090->tdm_slots > 1)
-			regval ^= M98090_BCI_MASK;*/
-		/* MX sharq : the reason of commenting the above code
-		 * was, it was causing the noise in the audio. Although
-		 * the comment says to invert the BCI for TDM, but inverting
-		 * caused the noise. So, not inverting.
-		 * The solution to the noise problem, DO NOT INVERT.
-		 */
-		regval &= (~M98090_BCI_MASK);
+		if (tdm_regval)
+			regval ^= M98090_BCI_MASK;
 
 		snd_soc_component_write(component,
 			M98090_REG_INTERFACE_FORMAT, regval);
+
+		regval = 0;
+		if (tdm_regval)
+			regval = max98090->tdm_lslot << M98090_TDM_SLOTL_SHIFT |
+				 max98090->tdm_rslot << M98090_TDM_SLOTR_SHIFT |
+				 0 << M98090_TDM_SLOTDLY_SHIFT;
+
+		snd_soc_component_write(component, M98090_REG_TDM_FORMAT, regval);
+		snd_soc_component_write(component, M98090_REG_TDM_CONTROL, tdm_regval);
 	}
 
 	return 0;
@@ -1775,46 +1737,22 @@ static int max98090_set_tdm_slot(struct snd_soc_dai *codec_dai,
 {
 	struct snd_soc_component *component = codec_dai->component;
 	struct max98090_priv *max98090 = snd_soc_component_get_drvdata(component);
-	struct max98090_cdata *cdata;
-	cdata = &max98090->dai[0];
 
 	if (slots < 0 || slots > 4)
 		return -EINVAL;
 
+	if (slot_width != 16)
+		return -EINVAL;
+
+	if (rx_mask != tx_mask)
+		return -EINVAL;
+
+	if (!rx_mask)
+		return -EINVAL;
+
 	max98090->tdm_slots = slots;
-	max98090->tdm_width = slot_width;
-
-	dev_info(component->dev, "The number of tdm slots = %d\n",slots);
-	dev_info(component->dev, "codec_dai->rx_mask = %d\n",codec_dai->rx_mask);
-	dev_info(component->dev, "codec_dai->tx_mask = %d\n",codec_dai->tx_mask);
-	dev_info(component->dev, "rx_mask = %d\n",rx_mask);
-	dev_info(component->dev, "tx_mask = %d\n",tx_mask);
-	dev_info(component->dev, "codec_dai->channels = %d\n",codec_dai->channels);
-
-	if (max98090->tdm_slots > 1) {
-		/* SLOTL SLOTR SLOTDLY */
-		snd_soc_component_write(component, M98090_REG_TDM_FORMAT,
-			0 << M98090_TDM_SLOTL_SHIFT |
-			1 << M98090_TDM_SLOTR_SHIFT |
-			0 << M98090_TDM_SLOTDLY_SHIFT);
-
-		/* FSW TDM */
-		snd_soc_component_update_bits(component, M98090_REG_TDM_CONTROL,
-			M98090_TDM_MASK,
-			M98090_TDM_MASK);
-
-		// mx sharq: setting it according to maxim config
-		snd_soc_component_write(component, M98090_REG_RECORD_TDM_SLOT,
-				0x01);
-	}
-
-	/*
-	 * Normally advisable to set TDM first, but this permits either order
-	 */
-	cdata->fmt = 0;
-
-	printk("%d %s %s\n",__LINE__,__FILE__,__func__);
-	max98090_dai_set_fmt(codec_dai, max98090->dai_fmt);
+	max98090->tdm_lslot = ffs(rx_mask) - 1;
+	max98090->tdm_rslot = fls(rx_mask) - 1;
 
 	return 0;
 }
@@ -2047,13 +1985,6 @@ static int max98090_dai_hw_params(struct snd_pcm_substream *substream,
 	if (params_channels(params) == 1)
 		max98090->bclk *= 2;
 
-	printk("%d %s %s\n",__LINE__,__FILE__,__func__);
-	printk(" slots = %d \n",max98090->tdm_slots);
-	printk(" pa1en = %d \n",max98090->pa1en);
-	printk(" pa2en = %d \n",max98090->pa2en);
-	printk(" channels = %d \n",params_channels(params));
-	printk(" width = %d \n",params_width(params));
-
 	max98090->lrclk = params_rate(params);
 
 	switch (params_width(params)) {
@@ -2065,32 +1996,26 @@ static int max98090_dai_hw_params(struct snd_pcm_substream *substream,
 		return -EINVAL;
 	}
 
-	if (max98090->master) {
-		printk("max98090 OPERATING as master\n");
+	if (max98090->master)
 		max98090_configure_bclk(component);
-	} else {
-		printk("max98090 OPERATING as slave\n");
-	}
 
 	cdata->rate = max98090->lrclk;
 
 	/* Update filter mode */
-	if (max98090->lrclk < 24000) {
+	if (max98090->lrclk < 24000)
 		snd_soc_component_update_bits(component, M98090_REG_FILTER_CONFIG,
 			M98090_MODE_MASK, 0);
-	} else {
+	else
 		snd_soc_component_update_bits(component, M98090_REG_FILTER_CONFIG,
 			M98090_MODE_MASK, M98090_MODE_MASK);
-	}
 
 	/* Update sample rate mode */
-	if (max98090->lrclk < 50000) {
+	if (max98090->lrclk < 50000)
 		snd_soc_component_update_bits(component, M98090_REG_FILTER_CONFIG,
 			M98090_DHF_MASK, 0);
-	} else {
+	else
 		snd_soc_component_update_bits(component, M98090_REG_FILTER_CONFIG,
 			M98090_DHF_MASK, M98090_DHF_MASK);
-	}
 
 	max98090_configure_dmic(max98090, max98090->dmic_freq, max98090->pclk,
 				max98090->lrclk);
@@ -2477,8 +2402,7 @@ static const struct snd_soc_dai_ops max98090_dai_ops = {
 	.no_capture_mute = 1,
 };
 
-static struct snd_soc_dai_driver max98090_dai[] = {
-{
+static struct snd_soc_dai_driver max98090_dai = {
 	.name = "HiFi",
 	.playback = {
 		.stream_name = "HiFi Playback",
@@ -2495,7 +2419,6 @@ static struct snd_soc_dai_driver max98090_dai[] = {
 		.formats = MAX98090_FORMATS,
 	},
 	.ops = &max98090_dai_ops,
-}
 };
 
 static int max98090_probe(struct snd_soc_component *component)
@@ -2532,6 +2455,9 @@ static int max98090_probe(struct snd_soc_component *component)
 	max98090->pa1en = 0;
 	max98090->pa2en = 0;
 
+	max98090->tdm_lslot = 0;
+	max98090->tdm_rslot = 1;
+
 	ret = snd_soc_component_read(component, M98090_REG_REVISION_ID);
 	if (ret < 0) {
 		dev_err(component->dev, "Failed to read device revision: %d\n",
@@ -2563,6 +2489,10 @@ static int max98090_probe(struct snd_soc_component *component)
 	INIT_WORK(&max98090->pll_det_disable_work,
 		  max98090_pll_det_disable_work);
 
+	/* Enable jack detection */
+	snd_soc_component_write(component, M98090_REG_JACK_DETECT,
+		M98090_JDETEN_MASK | M98090_JDEB_25MS);
+
 	/*
 	 * Clear any old interrupts.
 	 * An old interrupt ocurring prior to installing the ISR
@@ -2570,9 +2500,8 @@ static int max98090_probe(struct snd_soc_component *component)
 	 */
 	snd_soc_component_read(component, M98090_REG_DEVICE_STATUS);
 
-	// mx sharq: part of the open source driver, but i do not find any need
 	/* High Performance is default */
-	/*snd_soc_component_update_bits(component, M98090_REG_DAC_CONTROL,
+	snd_soc_component_update_bits(component, M98090_REG_DAC_CONTROL,
 		M98090_DACHP_MASK,
 		1 << M98090_DACHP_SHIFT);
 	snd_soc_component_update_bits(component, M98090_REG_DAC_CONTROL,
@@ -2580,7 +2509,11 @@ static int max98090_probe(struct snd_soc_component *component)
 		0 << M98090_PERFMODE_SHIFT);
 	snd_soc_component_update_bits(component, M98090_REG_ADC_CONTROL,
 		M98090_ADCHP_MASK,
-		1 << M98090_ADCHP_SHIFT);*/
+		1 << M98090_ADCHP_SHIFT);
+
+	/* Turn on VCM bandgap reference */
+	snd_soc_component_write(component, M98090_REG_BIAS_CONTROL,
+		M98090_VCM_MODE_MASK);
 
 	err = device_property_read_u32(component->dev, "maxim,micbias", &micbias);
 	if (err) {
@@ -2633,7 +2566,6 @@ static const struct snd_soc_component_driver soc_component_dev_max98090 = {
 	.idle_bias_on		= 1,
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
-	.non_legacy_dai_naming	= 1,
 };
 
 static const struct regmap_config max98090_regmap = {
@@ -2648,44 +2580,16 @@ static const struct regmap_config max98090_regmap = {
 	.cache_type = REGCACHE_RBTREE,
 };
 
-static int proc_max98090_show(struct seq_file *m, void *v)
-{
-	int adr, i;
-	uint16_t data;
-
-	seq_printf(m, "REG VALUE      BIN\n");
-
-	for (adr = 1; adr < max98090_mx->reg_cache_size; adr++) {
-		data = i2c_smbus_read_byte_data(max98090_mx->client,
-				(u8)adr);
-		seq_printf(m, "(%x)%02d=(%x)%03d  ", adr, adr, data, data);
-		for (i = 7; i >= 0; i--) {
-			seq_printf(m, "%d%s", ((data >> i) & 1), (i % 4) ? "" : " ");
-		}
-		seq_printf(m, "\n");
-	}
-
-	return 0;
-}
-
-static int proc_max98090_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, proc_max98090_show, NULL);
-}
-
-static const struct proc_ops proc_max98090_ops = {
-	.proc_open		= proc_max98090_open,
-	.proc_read		= seq_read,
-	.proc_lseek		= seq_lseek,
-	.proc_release		= single_release,
+static const struct i2c_device_id max98090_i2c_id[] = {
+	{ "max98090", MAX98090 },
+	{ "max98091", MAX98091 },
+	{ }
 };
+MODULE_DEVICE_TABLE(i2c, max98090_i2c_id);
 
-static int max98090_i2c_probe(struct i2c_client *i2c,
-				 const struct i2c_device_id *i2c_id)
+static int max98090_i2c_probe(struct i2c_client *i2c)
 {
 	struct max98090_priv *max98090;
-	const struct acpi_device_id *acpi_id;
-	kernel_ulong_t driver_data = 0;
 	int ret;
 
 	pr_debug("max98090_i2c_probe\n");
@@ -2695,27 +2599,9 @@ static int max98090_i2c_probe(struct i2c_client *i2c,
 	if (max98090 == NULL)
 		return -ENOMEM;
 
-	max98090_mx = devm_kzalloc(&i2c->dev, sizeof(struct max98090_t),
-			GFP_KERNEL);
-	if (max98090_mx == NULL)
-		return -ENOMEM;
-
-	if (ACPI_HANDLE(&i2c->dev)) {
-		acpi_id = acpi_match_device(i2c->dev.driver->acpi_match_table,
-					    &i2c->dev);
-		if (!acpi_id) {
-			dev_err(&i2c->dev, "No driver data\n");
-			return -EINVAL;
-		}
-		driver_data = acpi_id->driver_data;
-	} else if (i2c_id) {
-		driver_data = i2c_id->driver_data;
-	}
-
-	max98090->devtype = driver_data;
+	max98090->devtype = (uintptr_t)i2c_get_match_data(i2c);
 	i2c_set_clientdata(i2c, max98090);
 	max98090->pdata = i2c->dev.platform_data;
-	max98090_mx->client = i2c;
 
 	ret = of_property_read_u32(i2c->dev.of_node, "maxim,dmic-freq",
 				   &max98090->dmic_freq);
@@ -2739,21 +2625,8 @@ static int max98090_i2c_probe(struct i2c_client *i2c,
 	}
 
 	ret = devm_snd_soc_register_component(&i2c->dev,
-			&soc_component_dev_max98090, max98090_dai,
-			ARRAY_SIZE(max98090_dai));
-
-	max98090_mx->reg_cache_size = ARRAY_SIZE(max98090_reg);
-	max98090_mx->reg_cache = kmemdup(max98090_reg,
-			sizeof(max98090_reg), GFP_KERNEL);
-	if (max98090_mx->reg_cache == NULL) {
-		printk("%s: out of memory max98090_mx", __func__);
-		kfree(max98090_mx);
-		return -ENOMEM;
-	}
-
-	/* setting a max98091 register output in /proc */
-	proc_create(MAX98091_PROC, 0444, NULL, &proc_max98090_ops);
-
+					      &soc_component_dev_max98090,
+					      &max98090_dai, 1);
 err_enable:
 	return ret;
 }
@@ -2773,14 +2646,11 @@ static void max98090_i2c_shutdown(struct i2c_client *i2c)
 	msleep(40);
 }
 
-static int max98090_i2c_remove(struct i2c_client *client)
+static void max98090_i2c_remove(struct i2c_client *client)
 {
 	max98090_i2c_shutdown(client);
-
-	return 0;
 }
 
-#ifdef CONFIG_PM
 static int max98090_runtime_resume(struct device *dev)
 {
 	struct max98090_priv *max98090 = dev_get_drvdata(dev);
@@ -2802,9 +2672,7 @@ static int max98090_runtime_suspend(struct device *dev)
 
 	return 0;
 }
-#endif
 
-#ifdef CONFIG_PM_SLEEP
 static int max98090_resume(struct device *dev)
 {
 	struct max98090_priv *max98090 = dev_get_drvdata(dev);
@@ -2821,20 +2689,11 @@ static int max98090_resume(struct device *dev)
 
 	return 0;
 }
-#endif
 
 static const struct dev_pm_ops max98090_pm = {
-	SET_RUNTIME_PM_OPS(max98090_runtime_suspend,
-		max98090_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(NULL, max98090_resume)
+	RUNTIME_PM_OPS(max98090_runtime_suspend, max98090_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(NULL, max98090_resume)
 };
-
-static const struct i2c_device_id max98090_i2c_id[] = {
-	{ "max98090", MAX98090 },
-	{ "max98091", MAX98091 },
-	{ }
-};
-MODULE_DEVICE_TABLE(i2c, max98090_i2c_id);
 
 #ifdef CONFIG_OF
 static const struct of_device_id max98090_of_match[] = {
@@ -2856,11 +2715,11 @@ MODULE_DEVICE_TABLE(acpi, max98090_acpi_match);
 static struct i2c_driver max98090_i2c_driver = {
 	.driver = {
 		.name = "max98090",
-		.pm = &max98090_pm,
+		.pm = pm_ptr(&max98090_pm),
 		.of_match_table = of_match_ptr(max98090_of_match),
 		.acpi_match_table = ACPI_PTR(max98090_acpi_match),
 	},
-	.probe  = max98090_i2c_probe,
+	.probe = max98090_i2c_probe,
 	.shutdown = max98090_i2c_shutdown,
 	.remove = max98090_i2c_remove,
 	.id_table = max98090_i2c_id,
